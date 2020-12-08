@@ -41,6 +41,16 @@ class Globals():
     def __repr__(self):
         return 'Globals object'
 
+    def short_site_to_site(self, short_site):
+        # Used for converting part of url to site name
+        self.site_name_dict = getattr(self, 'site_name_dict', {})
+        if len(self.site_name_dict) == 0:
+            # Create this if it doesn't yet exist
+            for site in self.sites.values():
+                name_shrt = site.name_shrt
+                self.site_name_dict[name_shrt] = site.name
+        return self.site_name_dict[short_site]
+
         
 class Site():
     """
@@ -69,11 +79,23 @@ class Site():
     def __str__(self):
         return self.name
     
-    def __repr__(self):
-        return 'Site object - ' + self.name
+    # def __repr__(self):
+    #     return 'Site object - ' + self.name
 
     def to_dict(self, g):
+        self.mercator()
+        return {
+            'name' : self.name,
+            'state' : self.postal_state,
+            'mlat' : self.mlat,
+            'mlng' : self.mlng,
+            'local_written_articles' : len(self.local_written_articles),
+            'local_recent_politics' : len(self.local_recent_politics)   
+            }
+
+    def mercator(self):
         if self.lat and self.lng:
+            # Calculations for converting into web mercator coordinates
             r_major = 6378137.0
             x = r_major * math.radians(self.lng)
             scale = x/self.lng
@@ -84,25 +106,11 @@ class Site():
         else:
             self.mlat = None
             self.mlng = None
-
-        return {
-            'name' : self.name,
-            'lat' : self.lat,
-            'lng' : self.lng,
-            'mlat' : self.mlat,
-            'mlng' : self.mlng,
-            # 'officials' : self.officials,
-            'article_count' : len(self.article_set),
-            'local_articles' : len(self.local_articles),
-            'local_written_articles' : len(self.local_written_articles),
-            'local_recent_politics' : len(self.local_recent_politics)   
-        }
     
     def update_postal_state(self, states_dict):
         # Uses the postal state dict to update this attribute
         postal_state = states_dict[self.state].postal_state
         self.postal_state = postal_state
-
 
     def find_zip(self, use_local_first=True):
         # Finding a good physical location for each site is a pain
@@ -158,7 +166,7 @@ class Site():
             # Sleep to stay within quota
             time.sleep(1)
             api_url = 'https://www.googleapis.com/civicinfo/v2/representatives'
-            # I ran out of time to hide this key, sorry!
+            # This key is restricted to this API
             api_key = 'AIzaSyDi_t4Mz-QOTOiyHEZuePk3g2ilaBtGeHI'
             # Will query for Senators and U.S. Representatives
             rep_info = requests.get(api_url, params={
@@ -189,14 +197,16 @@ class Site():
             pass
         else:
             api_url = 'https://maps.googleapis.com/maps/api/geocode/json'
-            # I ran out of time to hide this key, sorry!
+            # This key is restricted to this API
             api_key = 'AIzaSyClAvR4jYdE_AsuFadjL_yHL1_TJWFr0To'
             # Stupid sites sometimes take a few tries to load
             attempt = 1
             while self.locales == None or attempt < 4:
+                # Exits loop if locale found
                 self.find_zip(use_local_first)
                 attempt += 1
             for locale in self.locales:
+                # For each zip code
                 geo_info = requests.get(api_url, params={
                         'key': api_key,
                         'address': locale}
@@ -209,6 +219,7 @@ class Site():
                         break
                 else:
                     pass
+        # Always reads from file, even if good response found above
         with open(file_name) as j:
             geo_json = json.load(j)
         return geo_json
@@ -237,15 +248,14 @@ class Article():
     
 class State():
     """
-    I originally built this help with my previous form of obtaining ZIP codes.
-    I don't think it is still necessary but I don't have time to worry before
-    milestone 2 is due.
+    Contains information about states.
     """
     def __init__(self, state_name, postal_state, lat, lng):
         self.name = state_name
         self.postal_state = postal_state
         self.lat = lat
         self.lng = lng
+        # Calculations for web mercator conversion
         r_major = 6378137.0
         x = r_major * math.radians(self.lng)
         scale = x/self.lng
@@ -262,14 +272,13 @@ class State():
         return self.postal_state + ' / ' + self.name
 
     def to_dict(self, g):
+        # Used to create dictionary for easy dataframe creation in notebook
         return {
             'name' : self.name,
-            'lat' : self.lat,
-            'lng' : self.lng,
             'mlat' : self.mlat,
             'mlng' : self.mlng,
             'local_recent_politics' : self.local_recent_politics
-        }
+            }
         
 
 class Official():
@@ -313,14 +322,43 @@ class Author():
         return {
             'name' : self.name,
             'article_count' : len(self.article_set),
-        }
+            }
 
     def network(self, g):
-        site_list = []
-        for article in self.article_set:
-            site_list.append(g.articles[article].home)
-        
-        return None
+        # Create a dictionary where the author's articles appear
+        # Sites that are listed multiple times can be grouped in a pd dataframe
+        self.site_list = getattr(self, 'site_list', [])
+        self.mlat_list = getattr(self, 'mlat_list', [])
+        self.mlng_list = getattr(self, 'mlng_list', [])
+        self.site_count_list = getattr(self, 'site_count_list', [])
+        if len(self.mlat_list) > 0:
+            # No need to run this again
+            pass
+        else:
+            for article in self.article_set:
+                # site_short is the shortened domain of the article url
+                site_short = g.articles[article].home
+                try:
+                    # Test for external site
+                    site_name = g.short_site_to_site(site_short)
+                except KeyError:
+                    # Probably external site link
+                    continue
+                if getattr(g.sites[site_name], 'mlat', None) == None:
+                    # Run the mercator conversion
+                    g.sites[site_name].mercator()
+                mlat = g.sites[site_name].mlat
+                mlng = g.sites[site_name].mlng
+                self.mlat_list.append(mlat)
+                self.mlng_list.append(mlng)
+                self.site_list.append(site_name)
+                self.site_count_list.append(1)
+        return {
+            'site_name' : self.site_list,
+            'mlat' : self.mlat_list,
+            'mlng' : self.mlng_list,
+            'count' : self.site_count_list
+            }
 
 
 def get_html(url):
@@ -614,10 +652,6 @@ def main():
         s_stop = None
         local_first = True
         pickle_file = 'data/g.pickle'
-    
-
-    # s_start = 0
-    # s_stop = 200
 
     g = Globals()
     # These links are known bad links
